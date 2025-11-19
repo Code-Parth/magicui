@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+
       - name: Install dependencies
         run: pnpm install
 
@@ -37,18 +38,81 @@ jobs:
           PAYLOAD: ${{ github.event.inputs.payload }}
 
       - name: Write blog posts
+        id: write_posts
         run: node .github/scripts/publish-articles.cjs
 
       - name: Delete payload
+        if: always()
         run: rm -f payload.json
 
       - name: Format code
         run: pnpm format:fix
 
+      - name: Verify formatting
+        id: verify_format
+        run: |
+          echo "Checking if formatting is correct..."
+          pnpm format:check || {
+            echo "❌ Formatting check failed after auto-fix"
+            echo "format_failed=true" >> $GITHUB_OUTPUT
+            exit 1
+          }
+
+      - name: Lint code
+        id: lint
+        run: |
+          echo "Running linter..."
+          pnpm lint:fix || {
+            echo "⚠️ Lint fix had issues, but continuing..."
+          }
+
+      - name: Type check
+        id: typecheck
+        continue-on-error: true
+        run: |
+          echo "Running type check..."
+          pnpm typecheck || {
+            echo "⚠️ Type check failed, but continuing with commit..."
+          }
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes detected"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Commit & push
+        if: steps.check_changes.outputs.has_changes == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Add blog article from webhook" || echo "No changes"
-          git push
+          git commit -m "Add blog article from webhook" || {
+            echo "❌ Commit failed"
+            exit 1
+          }
+          git push || {
+            echo "❌ Push failed"
+            exit 1
+          }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]; then
+            echo "✅ Articles published and pushed successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No changes to commit" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Checks:" >> $GITHUB_STEP_SUMMARY
+          echo "- Format: ${{ steps.verify_format.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Lint: ${{ steps.lint.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Type check: ${{ steps.typecheck.outcome }}" >> $GITHUB_STEP_SUMMARY
